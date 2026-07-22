@@ -1,6 +1,9 @@
 #include "global.h"
 #include "gflib.h"
 #include "gba/flash_internal.h"
+#ifdef PLATFORM_NATIVE
+#include "storage.h"
+#endif
 #include "load_save.h"
 #include "pokemon.h"
 #include "pokemon_storage_system.h"
@@ -45,6 +48,17 @@ COMMON_DATA struct PokemonStorage *gPokemonStoragePtr = NULL;
 
 void CheckForFlashMemory(void)
 {
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §7 / ARCHITECTURE.md.
+    // Guarded wholesale: native has no vendor chip to detect and no
+    // flash-timeout hardware timer to arm (InitFlashTimer), so there's
+    // nothing in the GBA branch worth preserving piecemeal. Points
+    // EraseFlashSector at the native adapter directly, since this
+    // function is the one place that would otherwise call IdentifyFlash()
+    // (the real assigner of that function pointer).
+#ifdef PLATFORM_NATIVE
+    EraseFlashSector = HalStorage_EraseSectorAdapter;
+    gFlashMemoryPresent = HalStorage_IsAvailable() ? TRUE : FALSE;
+#else
     if (!IdentifyFlash())
     {
         gFlashMemoryPresent = TRUE;
@@ -54,6 +68,7 @@ void CheckForFlashMemory(void)
     {
         gFlashMemoryPresent = FALSE;
     }
+#endif
 }
 
 void ClearSav2(void)

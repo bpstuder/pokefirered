@@ -3,6 +3,9 @@
 #include "bg.h"
 #include "dma3.h"
 #include "gpu_regs.h"
+#ifdef PLATFORM_NATIVE
+#include "gfx.h"
+#endif
 
 #define DISPCNT_ALL_BG_AND_MODE_BITS    (DISPCNT_BG_ALL_ON | 0x7)
 
@@ -181,12 +184,23 @@ u8 LoadBgVram(u8 bg, const void *src, u16 size, u16 destOffset, u8 mode)
 
         offset = destOffset + offset;
 
+        // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §1 / ARCHITECTURE.md.
+        // Native's HalGfx_CopyToRegion is synchronous (applied immediately,
+        // no async DMA queue), so there's nothing for callers' busy-bit
+        // tracking (sDmaBusyBitfield in LoadBgTiles/LoadBgTilemap) to wait
+        // on — cursor is a fixed non-error sentinel and those callers skip
+        // setting the bit entirely under PLATFORM_NATIVE.
+#ifdef PLATFORM_NATIVE
+        HalGfx_CopyToRegion(HALGFX_DEST_BG_VRAM, offset, src, size);
+        cursor = 0;
+#else
         cursor = RequestDma3Copy(src, (void *)(offset + BG_VRAM), size, DMA3_16BIT);
 
         if (cursor == -1)
         {
             return -1;
         }
+#endif
     }
     else
     {
@@ -439,7 +453,10 @@ u16 LoadBgTiles(u8 bg, const void *src, u16 size, u16 destOffset)
         return -1;
     }
 
+#ifndef PLATFORM_NATIVE
+    // Nothing to track natively — see the [Phase 2] note in LoadBgVram.
     sDmaBusyBitfield[cursor / 0x20] |= (1 << (cursor % 0x20));
+#endif
 
     if (gWindowTileAutoAllocEnabled == TRUE)
     {
@@ -460,7 +477,10 @@ u16 LoadBgTilemap(u8 bg, const void *src, u16 size, u16 destOffset)
         return -1;
     }
 
+#ifndef PLATFORM_NATIVE
+    // Nothing to track natively — see the [Phase 2] note in LoadBgVram.
     sDmaBusyBitfield[cursor / 0x20] |= (1 << (cursor % 0x20));
+#endif
 
     return cursor;
 }

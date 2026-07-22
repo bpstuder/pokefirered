@@ -1,5 +1,19 @@
 #include "global.h"
 #include "gba/m4a_internal.h"
+#ifdef PLATFORM_NATIVE
+#include "audio.h"
+#include <string.h>
+// [Phase 2] Native's backing storage for the SOUND_INFO_PTR redirect
+// declared in gba/defines.h — see that macro's comment for why.
+struct SoundInfo *gNativeSoundInfoPtr;
+// [Phase 2] CgbSound()'s per-channel register shadow — see that
+// function's [Phase 2] comment for the full design. Indexed [ch-1][0..4]
+// = nrx0..nrx4. vu8 (not u8) so it's pointer-compatible with the real
+// GBA branch's vu8* declarations without needing separate typing.
+static vu8 sCgbShadowRegs[4][5];
+static u8 sCgbShadowWaveRam[16];
+static vu8 sCgbShadowNR51;
+#endif
 
 extern const u8 gCgb3Vol[];
 
@@ -259,6 +273,20 @@ void MPlayExtender(struct CgbChannel *cgbChans)
     struct SoundInfo *soundInfo;
     u32 ident;
 
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §5 / ARCHITECTURE.md.
+    // Guarded wholesale: REG_SOUNDCNT_X/L re-assertion is redundant with
+    // SoundInit's HalAudio_Init() call (already handles master enable)
+    // and has no distinct native equivalent worth adding — the 4-channel
+    // silence + master-volume setup is the part with real portable
+    // intent, and maps directly onto existing HalAudio_CgbSilence/
+    // HalAudio_CgbSetMasterVolume calls.
+#ifdef PLATFORM_NATIVE
+    HalAudio_CgbSilence(HALAUDIO_CGB_CH1_SQUARE_SWEEP);
+    HalAudio_CgbSilence(HALAUDIO_CGB_CH2_SQUARE);
+    HalAudio_CgbSilence(HALAUDIO_CGB_CH3_WAVE);
+    HalAudio_CgbSilence(HALAUDIO_CGB_CH4_NOISE);
+    HalAudio_CgbSetMasterVolume(7, 7);
+#else
     REG_SOUNDCNT_X = SOUND_MASTER_ENABLE
                    | SOUND_4_ON
                    | SOUND_3_ON
@@ -273,6 +301,7 @@ void MPlayExtender(struct CgbChannel *cgbChans)
     REG_NR44 = 0x80;
     REG_NR30 = 0;
     REG_NR50 = 0x77;
+#endif
 
     soundInfo = SOUND_INFO_PTR;
 
@@ -354,6 +383,15 @@ void SoundInit(struct SoundInfo *soundInfo)
 {
     soundInfo->ident = 0;
 
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §5 / ARCHITECTURE.md.
+    // Guarded wholesale: DMA1/2 channel setup + REG_SOUNDCNT_X/H/BIAS +
+    // FIFO source/dest addresses are a coordinated hardware-init
+    // sequence with no piece worth preserving separately for native —
+    // HalAudio_Init covers the equivalent master-enable/stereo-mix setup.
+#ifdef PLATFORM_NATIVE
+    HalAudio_Init();
+    HalAudio_SetStereoMix(1);
+#else
     if (REG_DMA1CNT & (DMA_REPEAT << 16))
         REG_DMA1CNT = ((DMA_ENABLE | DMA_START_NOW | DMA_32BIT | DMA_SRC_INC | DMA_DEST_FIXED) << 16) | 4;
 
@@ -376,9 +414,16 @@ void SoundInit(struct SoundInfo *soundInfo)
     REG_DMA1DAD = (s32)&REG_FIFO_A;
     REG_DMA2SAD = (s32)soundInfo->pcmBuffer + PCM_DMA_BUF_SIZE;
     REG_DMA2DAD = (s32)&REG_FIFO_B;
+#endif
 
     SOUND_INFO_PTR = soundInfo;
+    // [Phase 2] CpuFill32 is a GBA BIOS SWI wrapper — not portable, same
+    // class of issue as the CpuCopy16 fix in palette.c.
+#ifdef PLATFORM_NATIVE
+    memset(soundInfo, 0, sizeof(struct SoundInfo));
+#else
     CpuFill32(0, soundInfo, sizeof(struct SoundInfo));
+#endif
 
     soundInfo->maxChans = 8;
     soundInfo->masterVolume = 15;
@@ -412,6 +457,13 @@ void SampleFreqSet(u32 freq)
     // CPU frequency 16.78Mhz
     soundInfo->divFreq = (16777216 / soundInfo->pcmFreq + 1) >> 1;
 
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §5 / ARCHITECTURE.md.
+    // Replaces the Timer0 + VCOUNT-polling hardware synchronization
+    // ritual — native has no hardware timer/DMA to synchronize with, so
+    // this is just bookkeeping the new rate for FeedPcm's benefit.
+#ifdef PLATFORM_NATIVE
+    HalAudio_SetSampleRate(soundInfo->pcmFreq, soundInfo->pcmSamplesPerVBlank);
+#else
     // Turn off timer 0.
     REG_TM0CNT_H = 0;
 
@@ -427,6 +479,7 @@ void SampleFreqSet(u32 freq)
         ;
 
     REG_TM0CNT_H = TIMER_ENABLE | TIMER_1CLK;
+#endif
 }
 
 void m4aSoundMode(u32 mode)
@@ -470,11 +523,20 @@ void m4aSoundMode(u32 mode)
 
     temp = mode & SOUND_MODE_DA_BIT;
 
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §5 / ARCHITECTURE.md.
+    // DA-bit-depth is a pure GBA PWM-output hardware nuance — no
+    // soundInfo field tracks it, nothing portable depends on this
+    // branch, so native just skips it entirely rather than needing a
+    // HAL call. The frequency-change branch right below needs no
+    // guarding at all: it only calls m4aSoundVSyncOff/SampleFreqSet,
+    // both already guarded at their own definitions.
+#ifndef PLATFORM_NATIVE
     if (temp)
     {
         temp = (temp & 0x300000) >> 14;
         REG_SOUNDBIAS_H = (REG_SOUNDBIAS_H & 0x3F) | temp;
     }
+#endif
 
     temp = mode & SOUND_MODE_FREQ;
 
@@ -534,6 +596,15 @@ void m4aSoundVSyncOff(void)
     {
         soundInfo->ident += 10;
 
+        // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §5 /
+        // ARCHITECTURE.md. The ident sentinel bookkeeping above/below
+        // stays unconditional (portable, other functions rely on it) —
+        // only the DMA1/2 register pokes are GBA-only. Buffer clear kept
+        // on both platforms, via memset instead of the BIOS-SWI-wrapping
+        // CpuFill32 for native.
+#ifdef PLATFORM_NATIVE
+        memset(soundInfo->pcmBuffer, 0, sizeof(soundInfo->pcmBuffer));
+#else
         if (REG_DMA1CNT & (DMA_REPEAT << 16))
             REG_DMA1CNT = ((DMA_ENABLE | DMA_START_NOW | DMA_32BIT | DMA_SRC_INC | DMA_DEST_FIXED) << 16) | 4;
 
@@ -544,6 +615,7 @@ void m4aSoundVSyncOff(void)
         REG_DMA2CNT_H = DMA_32BIT;
 
         CpuFill32(0, soundInfo->pcmBuffer, sizeof(soundInfo->pcmBuffer));
+#endif
     }
 }
 
@@ -555,8 +627,13 @@ void m4aSoundVSyncOn(void)
     if (ident == ID_NUMBER)
         return;
 
+    // [Phase 2] Only the DMA1/2 register pokes are guarded — nothing to
+    // do on native (no real FIFO DMA to re-arm), the ident/pcmDmaCounter
+    // bookkeeping below stays unconditional.
+#ifndef PLATFORM_NATIVE
     REG_DMA1CNT_H = DMA_ENABLE | DMA_START_SPECIAL | DMA_32BIT | DMA_REPEAT;
     REG_DMA2CNT_H = DMA_ENABLE | DMA_START_SPECIAL | DMA_32BIT | DMA_REPEAT;
+#endif
 
     soundInfo->pcmDmaCounter = 0;
     soundInfo->ident = ident - 10;
@@ -856,6 +933,26 @@ u32 MidiKeyToCgbFreq(u8 chanNum, u8 key, u8 fineAdjust)
 
 void CgbOscOff(u8 chanNum)
 {
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §5 / ARCHITECTURE.md.
+    // CgbSound() itself (the per-frame envelope engine that drives
+    // channels 1-4 during normal playback) is NOT rewired yet — unlike
+    // this function, it computes raw register pointers once and writes
+    // through them at many scattered points across a large branchy
+    // state machine, not via one composed value at the end like
+    // gpu_regs.c's register-shadow pattern. Cleanly abstracting it
+    // needs restructuring the state machine to buffer values before
+    // writing, which is its own, more careful piece of work — deferred,
+    // not attempted here under time pressure. See ROADMAP.md Phase 2
+    // Stage B for tracking.
+#ifdef PLATFORM_NATIVE
+    switch (chanNum)
+    {
+    case 1: HalAudio_CgbSilence(HALAUDIO_CGB_CH1_SQUARE_SWEEP); break;
+    case 2: HalAudio_CgbSilence(HALAUDIO_CGB_CH2_SQUARE); break;
+    case 3: HalAudio_CgbSilence(HALAUDIO_CGB_CH3_WAVE); break;
+    default: HalAudio_CgbSilence(HALAUDIO_CGB_CH4_NOISE); break;
+    }
+#else
     switch (chanNum)
     {
     case 1:
@@ -873,6 +970,7 @@ void CgbOscOff(u8 chanNum)
         REG_NR42 = 8;
         REG_NR44 = 0x80;
     }
+#endif
 }
 
 static inline int CgbPan(struct CgbChannel *chan)
@@ -934,6 +1032,9 @@ void CgbSound(void)
     vu8 *nrx3ptr;
     vu8 *nrx4ptr;
     s32 envelopeStepTimeAndDir;
+#ifdef PLATFORM_NATIVE
+    bool8 justSilenced;
+#endif
 
     // Most comparision operations that cast to s8 perform 'and' by 0xFF.
     int mask = 0xff;
@@ -948,7 +1049,56 @@ void CgbSound(void)
         if (!(channels->statusFlags & SOUND_CHANNEL_SF_ON))
             continue;
 
+#ifdef PLATFORM_NATIVE
+        justSilenced = FALSE;
+#endif
+
         /* 1. determine hardware channel registers */
+        // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §5 /
+        // ARCHITECTURE.md. This switch is CgbSound()'s ENTIRE hardware
+        // seam: every other line in this ~300-line function accesses
+        // hardware only indirectly, through the 5 pointers set here.
+        // Redirecting them to a per-channel shadow byte array is enough
+        // to make the whole rest of the function's branchy envelope
+        // state machine (attack/decay/sustain/release, scattered reads
+        // and writes throughout) work correctly on native completely
+        // unchanged — not one other line in this function needs editing.
+        // REG_WAVE_RAM0-3 (channel 3 wave upload, below) and REG_NR51
+        // (panning, near the end) aren't reached through these pointers
+        // and are guarded separately at their own call sites.
+#ifdef PLATFORM_NATIVE
+        switch (ch)
+        {
+        case 1:
+            nrx0ptr = &sCgbShadowRegs[0][0];
+            nrx1ptr = &sCgbShadowRegs[0][1];
+            nrx2ptr = &sCgbShadowRegs[0][2];
+            nrx3ptr = &sCgbShadowRegs[0][3];
+            nrx4ptr = &sCgbShadowRegs[0][4];
+            break;
+        case 2:
+            nrx0ptr = &sCgbShadowRegs[1][0];
+            nrx1ptr = &sCgbShadowRegs[1][1];
+            nrx2ptr = &sCgbShadowRegs[1][2];
+            nrx3ptr = &sCgbShadowRegs[1][3];
+            nrx4ptr = &sCgbShadowRegs[1][4];
+            break;
+        case 3:
+            nrx0ptr = &sCgbShadowRegs[2][0];
+            nrx1ptr = &sCgbShadowRegs[2][1];
+            nrx2ptr = &sCgbShadowRegs[2][2];
+            nrx3ptr = &sCgbShadowRegs[2][3];
+            nrx4ptr = &sCgbShadowRegs[2][4];
+            break;
+        default:
+            nrx0ptr = &sCgbShadowRegs[3][0];
+            nrx1ptr = &sCgbShadowRegs[3][1];
+            nrx2ptr = &sCgbShadowRegs[3][2];
+            nrx3ptr = &sCgbShadowRegs[3][3];
+            nrx4ptr = &sCgbShadowRegs[3][4];
+            break;
+        }
+#else
         switch (ch)
         {
         case 1:
@@ -980,6 +1130,7 @@ void CgbSound(void)
             nrx4ptr = (vu8 *)(REG_ADDR_NR44);
             break;
         }
+#endif
 
         prevC15 = soundInfo->c15;
         envelopeStepTimeAndDir = *nrx2ptr;
@@ -1004,10 +1155,19 @@ void CgbSound(void)
                     if (channels->wavePointer != channels->currentPointer)
                     {
                         *nrx0ptr = 0x40;
+                        // [Phase 2] See docs/wiki/Hardware-Touchpoints.md
+                        // §5 / ARCHITECTURE.md. wavePointer is u32*, so
+                        // wavePointer[0..3] is 16 bytes total, matching
+                        // REG_WAVE_RAM0-3's combined size — a plain copy.
+#ifdef PLATFORM_NATIVE
+                        memcpy(sCgbShadowWaveRam, channels->wavePointer, sizeof(sCgbShadowWaveRam));
+                        HalAudio_CgbSetWaveRam(sCgbShadowWaveRam);
+#else
                         REG_WAVE_RAM0 = channels->wavePointer[0];
                         REG_WAVE_RAM1 = channels->wavePointer[1];
                         REG_WAVE_RAM2 = channels->wavePointer[2];
                         REG_WAVE_RAM3 = channels->wavePointer[3];
+#endif
                         channels->currentPointer = channels->wavePointer;
                     }
                     *nrx0ptr = 0;
@@ -1053,6 +1213,13 @@ void CgbSound(void)
             oscillator_off:
                 CgbOscOff(ch);
                 channels->statusFlags = 0;
+                // [Phase 2] See the channel_complete: flush's own
+                // [Phase 2] comment below — this path must not flush
+                // the (now-stale, pre-silence) shadow register bytes
+                // right after CgbOscOff already silenced the channel.
+#ifdef PLATFORM_NATIVE
+                justSilenced = TRUE;
+#endif
                 goto channel_complete;
             }
             goto envelope_complete;
@@ -1184,6 +1351,15 @@ void CgbSound(void)
         /* 3. apply pitch to HW registers */
         if (channels->modify & CGB_CHANNEL_MO_PIT)
         {
+            // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §5 /
+            // ARCHITECTURE.md. This whole branch is a minor pitch nudge
+            // for fixed-frequency CGB voices, compensating for which of
+            // two possible GBA PWM sample rates is active — no portable
+            // state depends on it (nothing in soundInfo/channels tracks
+            // "current PWM rate" for later use), so native just skips
+            // it entirely, same precedent as m4aSoundMode's DA-bit
+            // branch.
+#ifndef PLATFORM_NATIVE
             if (ch < 4 && (channels->type & TONEDATA_TYPE_FIX))
             {
                 int dac_pwm_rate = REG_SOUNDBIAS_H;
@@ -1193,6 +1369,7 @@ void CgbSound(void)
                 else if (dac_pwm_rate < 0x80)   // if PWM rate = 65536 Hz
                     channels->frequency = (channels->frequency + 1) & 0x7fe;
             }
+#endif
 
             if (ch != 4)
                 *nrx3ptr = channels->frequency;
@@ -1205,7 +1382,15 @@ void CgbSound(void)
         /* 4. apply envelope & volume to HW registers */
         if (channels->modify & CGB_CHANNEL_MO_VOL)
         {
+            // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §5 /
+            // ARCHITECTURE.md — REG_NR51 isn't reached through the
+            // nrx0-4 pointers, guarded separately here with its own
+            // shadow byte, flushed via HalAudio_CgbSetPanningRaw below.
+#ifdef PLATFORM_NATIVE
+            sCgbShadowNR51 = (sCgbShadowNR51 & ~channels->panMask) | channels->pan;
+#else
             REG_NR51 = (REG_NR51 & ~channels->panMask) | channels->pan;
+#endif
             if (ch == 3)
             {
                 *nrx2ptr = gCgb3Vol[channels->envelopeVolume];
@@ -1227,6 +1412,28 @@ void CgbSound(void)
         }
 
     channel_complete:
+        // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §5 /
+        // ARCHITECTURE.md. Flushes this channel's current shadow
+        // register state (whether or not anything changed this
+        // specific frame — idempotent) and the shared NR51 panning
+        // shadow, once per active channel per frame — but NOT when we
+        // just arrived here via the oscillator_off goto: CgbOscOff()
+        // already silenced the channel through its own dedicated
+        // HalAudio_CgbSilence call, and the shadow bytes here are stale
+        // (this path bypasses the pitch/volume-apply sections above
+        // entirely, same as it does on real hardware) — flushing them
+        // now would send old, possibly-active-sounding register state
+        // right after the silence call and could audibly un-silence it.
+#ifdef PLATFORM_NATIVE
+        if (!justSilenced)
+        {
+            HalAudio_CgbSetChannel((HalAudioCgbChannel)(ch - 1),
+                                    sCgbShadowRegs[ch - 1][0], sCgbShadowRegs[ch - 1][1],
+                                    sCgbShadowRegs[ch - 1][2], sCgbShadowRegs[ch - 1][3],
+                                    sCgbShadowRegs[ch - 1][4]);
+            HalAudio_CgbSetPanningRaw(sCgbShadowNR51);
+        }
+#endif
         channels->modify = 0;
     }
 }
@@ -1759,6 +1966,23 @@ void SetPokemonCryStereo(u32 val)
 {
     struct SoundInfo *soundInfo = SOUND_INFO_PTR;
 
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §5 / ARCHITECTURE.md.
+    // NOTE: this native branch is intentionally NOT a drop-in restructure
+    // of the #else below — an earlier version of this edit moved
+    // soundInfo->mode out of the if/else branches into shared code
+    // after the #endif, which is behaviorally equivalent but changed
+    // agbcc's codegen for the GBA path and broke ROM matching (caught
+    // by the make-gba checksum check). The #else branch below is left
+    // byte-for-byte identical in structure to the pre-Phase-2 original;
+    // never restructure/reorder statements in a branch that still
+    // compiles for the GBA target, even for "equivalent" simplification.
+#ifdef PLATFORM_NATIVE
+    HalAudio_SetStereoMix(val != 0);
+    if (val)
+        soundInfo->mode &= ~1;
+    else
+        soundInfo->mode |= 1;
+#else
     if (val)
     {
         REG_SOUNDCNT_H = SOUND_B_TIMER_0 | SOUND_B_LEFT_OUTPUT
@@ -1773,6 +1997,7 @@ void SetPokemonCryStereo(u32 val)
                        | SOUND_B_MIX_HALF | SOUND_A_MIX_HALF | SOUND_CGB_MIX_FULL;
         soundInfo->mode |= 1;
     }
+#endif
 }
 
 void SetPokemonCryPriority(u8 val)

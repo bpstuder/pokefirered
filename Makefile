@@ -71,7 +71,11 @@ SHELL := bash -o pipefail
 # Set flags for tools
 ASFLAGS := -mcpu=arm7tdmi --defsym $(GAME_VERSION)=1 --defsym REVISION=$(GAME_REVISION) --defsym $(GAME_LANGUAGE)=1 --defsym MODERN=$(MODERN)
 
-INCLUDE_DIRS := include
+# ../platform/hal/include is added for the native port's HAL headers
+# (see ARCHITECTURE.md). Engine code only #includes them behind
+# `#ifdef PLATFORM_NATIVE` guards, which is never defined for this GBA
+# target, so this path addition has zero effect on `make gba`'s output.
+INCLUDE_DIRS := include ../platform/hal/include
 INCLUDE_CPP_ARGS := $(INCLUDE_DIRS:%=-iquote %)
 INCLUDE_SCANINC_ARGS := $(INCLUDE_DIRS:%=-I %)
 

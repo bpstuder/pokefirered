@@ -1,5 +1,21 @@
 #include "gba/gba.h"
 #include "gba/flash_internal.h"
+#ifdef PLATFORM_NATIVE
+#include "storage.h"
+#endif
+
+// [Phase 2] See docs/wiki/Hardware-Touchpoints.md §7 / ARCHITECTURE.md.
+// Physical flash sector size, hardcoded rather than read from gFlash
+// (which is only populated by the real vendor-detection path IdentifyFlash()
+// — native's CheckForFlashMemory() branch skips that entirely, so gFlash
+// stays NULL on native). This value is the chip's actual hardware
+// geometry (confirmed in agb_flash_mx.c's MX29L010/DefaultFlash setup
+// tables: 4096-byte sectors), not save-format knowledge — save.c's
+// SECTOR_SIZE happens to match it, but that's the save format aligning
+// to hardware, not the other way around.
+#ifdef PLATFORM_NATIVE
+#define NATIVE_FLASH_SECTOR_SIZE 4096u
+#endif
 
 static u8 sTimerNum;
 static u16 sTimerCount;
@@ -139,6 +155,15 @@ void ReadFlash_Core(vu8 *src, u8 *dest, u32 size)
 
 void ReadFlash(u16 sectorNum, u32 offset, void *dest, u32 size)
 {
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §7 / ARCHITECTURE.md.
+    // Guarded wholesale rather than piecemeal: the GBA path's RAM-
+    // relocation trick (self-copying ReadFlash_Core into a stack buffer
+    // to force execution from RAM, a bus-timing workaround) has no
+    // meaning on native — there's no flash bus to work around, so
+    // there's nothing salvageable to preserve piece by piece.
+#ifdef PLATFORM_NATIVE
+    HalStorage_Read((u32)sectorNum * NATIVE_FLASH_SECTOR_SIZE + offset, dest, size);
+#else
     u8 *src;
     u16 i;
     vu16 readFlash_Core_Buffer[0x40];
@@ -171,6 +196,7 @@ void ReadFlash(u16 sectorNum, u32 offset, void *dest, u32 size)
     src = FLASH_BASE + (sectorNum << gFlash->sector.shift) + offset;
 
     readFlash_Core(src, dest, size);
+#endif
 }
 
 u32 VerifyFlashSector_Core(u8 *src, u8 *tgt, u32 size)
@@ -260,6 +286,13 @@ u32 VerifyFlashSectorNBytes(u16 sectorNum, u8 *src, u32 n)
 
 u32 ProgramFlashSectorAndVerify(u16 sectorNum, u8 *src)
 {
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §7 / ARCHITECTURE.md.
+    // Guarded wholesale, same reasoning as ReadFlash above: the 3-attempt
+    // erase/program/verify retry loop is a real-flash-chip write-timing
+    // concern with nothing to preserve for a native file write.
+#ifdef PLATFORM_NATIVE
+    return HalStorage_Write((u32)sectorNum * NATIVE_FLASH_SECTOR_SIZE, src, NATIVE_FLASH_SECTOR_SIZE) ? 0 : 1;
+#else
     u8 i;
     u32 result;
 
@@ -275,7 +308,20 @@ u32 ProgramFlashSectorAndVerify(u16 sectorNum, u8 *src)
     }
 
     return result; // return 0 if verified and programmed.
+#endif
 }
+
+#ifdef PLATFORM_NATIVE
+// [Phase 2] EraseFlashSector is a vendor-dispatched function *pointer*
+// (assigned by IdentifyFlash), not a plain function — see
+// gba/flash_internal.h's declaration of this adapter for why. Return
+// convention matches the flash driver's (0 = success), inverted from
+// HalStorage_Erase's (nonzero = success).
+u16 HalStorage_EraseSectorAdapter(u16 sectorNum)
+{
+    return HalStorage_Erase((u32)sectorNum * NATIVE_FLASH_SECTOR_SIZE, NATIVE_FLASH_SECTOR_SIZE) ? 0 : 1;
+}
+#endif
 
 u32 ProgramFlashSectorAndVerifyNBytes(u16 sectorNum, void *dataSrc, u32 n)
 {

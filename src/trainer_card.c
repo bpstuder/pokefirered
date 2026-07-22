@@ -1,6 +1,9 @@
 #include "global.h"
 #include "gflib.h"
 #include "scanline_effect.h"
+#ifdef PLATFORM_NATIVE
+#include "gfx.h"
+#endif
 #include "task.h"
 #include "link.h"
 #include "overworld.h"
@@ -986,12 +989,21 @@ static void TrainerCardNull(void)
 
 static void DmaClearOam(void)
 {
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §1 / ARCHITECTURE.md
+#ifdef PLATFORM_NATIVE
+    HalGfx_ClearRegion(HALGFX_DEST_OAM, 0, OAM_SIZE);
+#else
     DmaClear32(3, (void *)OAM, OAM_SIZE);
+#endif
 }
 
 static void DmaClearPltt(void)
 {
+#ifdef PLATFORM_NATIVE
+    HalGfx_ClearRegion(HALGFX_DEST_PLTT, 0, PLTT_SIZE);
+#else
     DmaClear16(3, (void *)PLTT, PLTT_SIZE);
+#endif
 }
 
 static void ResetBgRegs(void)

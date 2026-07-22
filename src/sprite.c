@@ -1,5 +1,8 @@
 #include "global.h"
 #include "gflib.h"
+#ifdef PLATFORM_NATIVE
+#include "gfx.h"
+#endif
 
 #define MAX_SPRITE_COPY_REQUESTS 64
 
@@ -636,7 +639,14 @@ void ResetOamRange(u8 a, u8 b)
 void LoadOam(void)
 {
     if (!gMain.oamLoadDisabled)
+    {
+        // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §1 / ARCHITECTURE.md
+#ifdef PLATFORM_NATIVE
+        HalGfx_CopyToRegion(HALGFX_DEST_OAM, 0, gMain.oamBuffer, sizeof(gMain.oamBuffer));
+#else
         CpuCopy32(gMain.oamBuffer, (void *)OAM, sizeof(gMain.oamBuffer));
+#endif
+    }
 }
 
 void ClearSpriteCopyRequests(void)

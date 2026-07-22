@@ -1,4 +1,7 @@
 #include "global.h"
+#ifdef PLATFORM_NATIVE
+#include "gfx.h"
+#endif
 
 static EWRAM_DATA struct {
     const u16 *src;
@@ -155,8 +158,21 @@ void TransferTilesetAnimsBuffer(void)
 {
     int i;
 
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §1 / ARCHITECTURE.md.
+    // Every AppendTilesetAnimToBuffer call site passes a BG_VRAM-relative
+    // dest (confirmed by reading every caller, not assumed), so this is
+    // a clean HALGFX_DEST_BG_VRAM seam.
     for (i = 0; i < sTilesetDMA3TransferBufferSize; i++)
+    {
+#ifdef PLATFORM_NATIVE
+        HalGfx_CopyToRegion(HALGFX_DEST_BG_VRAM,
+                             (u8 *)sTilesetDMA3TransferBuffer[i].dest - (u8 *)BG_VRAM,
+                             sTilesetDMA3TransferBuffer[i].src,
+                             sTilesetDMA3TransferBuffer[i].size);
+#else
         DmaCopy16(3, sTilesetDMA3TransferBuffer[i].src, sTilesetDMA3TransferBuffer[i].dest, sTilesetDMA3TransferBuffer[i].size);
+#endif
+    }
 
     sTilesetDMA3TransferBufferSize = 0;
 }
