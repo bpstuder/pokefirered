@@ -17,10 +17,76 @@
 #include "scanline_effect.h"
 #include "event_object_movement.h"
 #include "constants/songs.h"
+#ifdef PLATFORM_NATIVE
+#include "gfx.h"
+#endif
 
 #define PALTAG_UNUSED_MUGSHOT 0x100A
 
 #define B_TRANS_DMA_FLAGS (1 | ((DMA_SRC_INC | DMA_DEST_FIXED | DMA_REPEAT | DMA_16BIT | DMA_START_HBLANK | DMA_ENABLE) << 16))
+
+#ifdef PLATFORM_NATIVE
+// [Phase 2] This file duplicates scanline_effect.c's DMA0 HBlank-repeat
+// mechanism directly (DmaSet/DmaStop) rather than going through its
+// ScanlineEffect_SetParams abstraction, and — unlike that file — has no
+// persistent "which register is currently active" state of its own.
+// These two helpers add that bookkeeping (native-only, zero effect on
+// the GBA build) so DmaStop-equivalent call sites that aren't
+// immediately followed by a DmaSet-equivalent (i.e. genuinely stopping,
+// not just re-arming for a new register) know what to clear. See
+// docs/wiki/Hardware-Touchpoints.md §1 / ARCHITECTURE.md.
+// Sized for 2 slots, not 1: VBlankCB_Spiral (below) is the one call site
+// that needs both WIN0H and WIN1H active simultaneously (see its own
+// [Phase 2] note) — every other call site only ever uses slot 0.
+static HalGfxReg sBattleTransitionScanlineRegs[2] = { HALGFX_REG_COUNT, HALGFX_REG_COUNT };
+
+static void BT_SetScanlineEffect(HalGfxReg reg, const u16 *values)
+{
+    sBattleTransitionScanlineRegs[0] = reg;
+    sBattleTransitionScanlineRegs[1] = HALGFX_REG_COUNT;
+    HalGfx_SetScanlineEffect(reg, values, DISPLAY_HEIGHT);
+}
+
+// De-interleaves a packed-32-bit-word source (low u16 = reg0's value,
+// high u16 = reg1's value, per scanline) into two per-register scanline
+// tables and installs both. Mirrors what a single DMA_32BIT HBlank
+// transfer into two memory-adjacent registers (REG_WIN0H/REG_WIN1H)
+// does on real hardware, just expressed as two independent per-register
+// effects instead of one dual-register one — gfx.h's scanline-effect
+// primitive is deliberately single-register only (see its header
+// comment), so this is done here rather than adding a one-off
+// dual-register HAL primitive for a single call site.
+static void BT_SetScanlineEffectDual(HalGfxReg reg0, HalGfxReg reg1, const u16 *packedSrc)
+{
+    static u16 sReg0Values[DISPLAY_HEIGHT];
+    static u16 sReg1Values[DISPLAY_HEIGHT];
+    int i;
+
+    for (i = 0; i < DISPLAY_HEIGHT; i++)
+    {
+        sReg0Values[i] = packedSrc[i * 2];
+        sReg1Values[i] = packedSrc[i * 2 + 1];
+    }
+
+    sBattleTransitionScanlineRegs[0] = reg0;
+    sBattleTransitionScanlineRegs[1] = reg1;
+    HalGfx_SetScanlineEffect(reg0, sReg0Values, DISPLAY_HEIGHT);
+    HalGfx_SetScanlineEffect(reg1, sReg1Values, DISPLAY_HEIGHT);
+}
+
+static void BT_StopScanlineEffect(void)
+{
+    int i;
+    for (i = 0; i < 2; i++)
+    {
+        if (sBattleTransitionScanlineRegs[i] != HALGFX_REG_COUNT)
+        {
+            HalGfx_ClearScanlineEffect(sBattleTransitionScanlineRegs[i]);
+            sBattleTransitionScanlineRegs[i] = HALGFX_REG_COUNT;
+        }
+    }
+}
+#endif
 
 // Used by each transition task to determine which of its functions to call
 #define tState          data[0]
@@ -1042,7 +1108,11 @@ static bool8 PatternWeave_CircularMask(struct Task *task)
     SetCircularMask(gScanlineEffectRegBuffers[0], DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2, task->tRadius);
     if (task->tRadius == 0)
     {
+#ifdef PLATFORM_NATIVE
+        BT_StopScanlineEffect();
+#else
         DmaStop(0);
+#endif
         FadeScreenBlack();
         DestroyTask(FindTaskIdByFunc(Task_BigPokeball)); // FindTaskIdByFunc(task->func) in Emerald to accomdate other functions
     }
@@ -1057,7 +1127,11 @@ static bool8 PatternWeave_CircularMask(struct Task *task)
 
 static void VBlankCB_SetWinAndBlend(void)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     VBlankCB_BattleTransition();
     if (sTransitionData->vblankDma)
         DmaCopy16(3, gScanlineEffectRegBuffers[0], gScanlineEffectRegBuffers[1], 320);
@@ -1071,13 +1145,21 @@ static void VBlankCB_SetWinAndBlend(void)
 static void VBlankCB_PatternWeave(void)
 {
     VBlankCB_SetWinAndBlend();
+#ifdef PLATFORM_NATIVE
+    BT_SetScanlineEffect(HALGFX_REG_BG0HOFS, gScanlineEffectRegBuffers[1]);
+#else
     DmaSet(0, gScanlineEffectRegBuffers[1], &REG_BG0HOFS, B_TRANS_DMA_FLAGS);
+#endif
 }
 
 static void VBlankCB_CircularMask(void)
 {
     VBlankCB_SetWinAndBlend();
+#ifdef PLATFORM_NATIVE
+    BT_SetScanlineEffect(HALGFX_REG_WIN0H, gScanlineEffectRegBuffers[1]);
+#else
     DmaSet(0, gScanlineEffectRegBuffers[1], &REG_WIN0H, B_TRANS_DMA_FLAGS);
+#endif
 }
 
 #undef tAmplitude
@@ -1381,7 +1463,11 @@ static bool8 ClockwiseWipe_TopLeft(struct Task *task)
 
 static bool8 ClockwiseWipe_End(struct Task *task)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     FadeScreenBlack();
     DestroyTask(FindTaskIdByFunc(Task_ClockwiseWipe));
     return FALSE;
@@ -1389,7 +1475,11 @@ static bool8 ClockwiseWipe_End(struct Task *task)
 
 static void VBlankCB_ClockwiseWipe(void)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     VBlankCB_BattleTransition();
     if (sTransitionData->vblankDma)
         DmaCopy16(3, gScanlineEffectRegBuffers[0], gScanlineEffectRegBuffers[1], DISPLAY_HEIGHT * 2);
@@ -1397,7 +1487,11 @@ static void VBlankCB_ClockwiseWipe(void)
     SetGpuReg(REG_OFFSET_WINOUT, sTransitionData->winOut);
     SetGpuReg(REG_OFFSET_WIN0V, sTransitionData->win0V);
     SetGpuReg(REG_OFFSET_WIN0H, gScanlineEffectRegBuffers[1][0]);
+#ifdef PLATFORM_NATIVE
+    BT_SetScanlineEffect(HALGFX_REG_WIN0H, gScanlineEffectRegBuffers[1]);
+#else
     DmaSet(0, gScanlineEffectRegBuffers[1], &REG_WIN0H, B_TRANS_DMA_FLAGS);
+#endif
 }
 
 //---------------------
@@ -1538,7 +1632,11 @@ static bool8 Wave_Main(struct Task *task)
 
 static bool8 Wave_End(struct Task *task)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     FadeScreenBlack();
     DestroyTask(FindTaskIdByFunc(Task_Wave));
     return FALSE;
@@ -1546,14 +1644,22 @@ static bool8 Wave_End(struct Task *task)
 
 static void VBlankCB_Wave(void)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     VBlankCB_BattleTransition();
     if (sTransitionData->vblankDma)
         DmaCopy16(3, gScanlineEffectRegBuffers[0], gScanlineEffectRegBuffers[1], DISPLAY_HEIGHT * 2);
     SetGpuReg(REG_OFFSET_WININ, sTransitionData->winIn);
     SetGpuReg(REG_OFFSET_WINOUT, sTransitionData->winOut);
     SetGpuReg(REG_OFFSET_WIN0V, sTransitionData->win0V);
+#ifdef PLATFORM_NATIVE
+    BT_SetScanlineEffect(HALGFX_REG_WIN0H, gScanlineEffectRegBuffers[1]);
+#else
     DmaSet(0, gScanlineEffectRegBuffers[1], &REG_WIN0H, B_TRANS_DMA_FLAGS);
+#endif
 }
 
 #undef tX
@@ -1799,7 +1905,11 @@ static bool8 Spiral_End(struct Task *task)
 
 static void VBlankCB_Spiral(void)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     VBlankCB_BattleTransition();
     if (sTransitionData->counter)
     {
@@ -1818,7 +1928,19 @@ static void VBlankCB_Spiral(void)
         SetGpuReg(REG_OFFSET_WIN1V, sTransitionData->win1V);
         SetGpuReg(REG_OFFSET_WIN0H, gScanlineEffectRegBuffers[0][0]);
         SetGpuReg(REG_OFFSET_WIN1H, gScanlineEffectRegBuffers[0][1]);
+        // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §1 / ARCHITECTURE.md.
+        // The one DmaSet in this file that doesn't fit
+        // HalGfx_SetScanlineEffect's per-register shape directly: a
+        // 32-bit transfer packing WIN0H (low 16 bits) and WIN1H (high
+        // 16 bits) into one HBlank-DMA write. BT_SetScanlineEffectDual
+        // de-interleaves the source into two per-register tables and
+        // installs both — see its own comment above for why that's
+        // preferred over a one-off dual-register HAL primitive.
+#ifdef PLATFORM_NATIVE
+        BT_SetScanlineEffectDual(HALGFX_REG_WIN0H, HALGFX_REG_WIN1H, gScanlineEffectRegBuffers[0]);
+#else
         DmaSet(0, gScanlineEffectRegBuffers[0], &REG_WIN0H, (DMA_32BIT << 16) | B_TRANS_DMA_FLAGS);
+#endif
     }
 }
 
@@ -2028,7 +2150,11 @@ static bool8 Mugshot_WaitPlayerSlide(struct Task *task)
     {
         sTransitionData->vblankDma = FALSE;
         SetVBlankCallback(NULL);
+#ifdef PLATFORM_NATIVE
+        BT_StopScanlineEffect();
+#else
         DmaStop(0);
+#endif
         memset(gScanlineEffectRegBuffers[0], 0, DISPLAY_HEIGHT * 2);
         memset(gScanlineEffectRegBuffers[1], 0, DISPLAY_HEIGHT * 2);
         SetGpuReg(REG_OFFSET_WIN0H, DISPLAY_WIDTH);
@@ -2108,7 +2234,11 @@ static bool8 Mugshot_FadeToBlack(struct Task *task)
 
 static bool8 Mugshot_End(struct Task *task)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     FadeScreenBlack();
     DestroyTask(FindTaskIdByFunc(task->func));
     return FALSE;
@@ -2116,7 +2246,11 @@ static bool8 Mugshot_End(struct Task *task)
 
 static void VBlankCB_Mugshots(void)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     VBlankCB_BattleTransition();
     if (sTransitionData->vblankDma)
         DmaCopy16(3, gScanlineEffectRegBuffers[0], gScanlineEffectRegBuffers[1], DISPLAY_HEIGHT * 2);
@@ -2124,17 +2258,29 @@ static void VBlankCB_Mugshots(void)
     SetGpuReg(REG_OFFSET_WININ, sTransitionData->winIn);
     SetGpuReg(REG_OFFSET_WINOUT, sTransitionData->winOut);
     SetGpuReg(REG_OFFSET_WIN0V, sTransitionData->win0V);
+#ifdef PLATFORM_NATIVE
+    BT_SetScanlineEffect(HALGFX_REG_WIN0H, gScanlineEffectRegBuffers[1]);
+#else
     DmaSet(0, gScanlineEffectRegBuffers[1], &REG_WIN0H, B_TRANS_DMA_FLAGS);
+#endif
 }
 
 static void VBlankCB_MugshotsFadeOut(void)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     VBlankCB_BattleTransition();
     if (sTransitionData->vblankDma)
         DmaCopy16(3, gScanlineEffectRegBuffers[0], gScanlineEffectRegBuffers[1], DISPLAY_HEIGHT * 2);
     SetGpuReg(REG_OFFSET_BLDCNT, sTransitionData->bldCnt);
+#ifdef PLATFORM_NATIVE
+    BT_SetScanlineEffect(HALGFX_REG_BLDY, gScanlineEffectRegBuffers[1]);
+#else
     DmaSet(0, gScanlineEffectRegBuffers[1], &REG_BLDY, B_TRANS_DMA_FLAGS);
+#endif
 }
 
 static void HBlankCB_Mugshots(void)
@@ -2356,7 +2502,11 @@ static bool8 Slice_Main(struct Task *task)
 
 static bool8 Slice_End(struct Task *task)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     FadeScreenBlack();
     DestroyTask(FindTaskIdByFunc(Task_Slice));
     return FALSE;
@@ -2364,14 +2514,22 @@ static bool8 Slice_End(struct Task *task)
 
 static void VBlankCB_Slice(void)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     VBlankCB_BattleTransition();
     SetGpuReg(REG_OFFSET_WININ, sTransitionData->winIn);
     SetGpuReg(REG_OFFSET_WINOUT, sTransitionData->winOut);
     SetGpuReg(REG_OFFSET_WIN0V, sTransitionData->win0V);
     if (sTransitionData->vblankDma)
         DmaCopy16(3, gScanlineEffectRegBuffers[0], gScanlineEffectRegBuffers[1], DISPLAY_HEIGHT * 4);
+#ifdef PLATFORM_NATIVE
+    BT_SetScanlineEffect(HALGFX_REG_WIN0H, &gScanlineEffectRegBuffers[1][DISPLAY_HEIGHT]);
+#else
     DmaSet(0, &gScanlineEffectRegBuffers[1][DISPLAY_HEIGHT], &REG_WIN0H, B_TRANS_DMA_FLAGS);
+#endif
 }
 
 static void HBlankCB_Slice(void)
@@ -2464,7 +2622,11 @@ static bool8 WhiteBarsFade_WaitBars(struct Task *task)
 static bool8 WhiteBarsFade_BlendToBlack(struct Task *task)
 {
     sTransitionData->vblankDma = FALSE;
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     SetVBlankCallback(NULL);
     SetHBlankCallback(NULL);
     sTransitionData->win0H = DISPLAY_WIDTH;
@@ -2491,7 +2653,11 @@ static bool8 WhiteBarsFade_End(struct Task *task)
 
 static void VBlankCB_WhiteBarsFade(void)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     VBlankCB_BattleTransition();
     SetGpuReg(REG_OFFSET_BLDCNT, sTransitionData->bldCnt);
     SetGpuReg(REG_OFFSET_WININ, sTransitionData->winIn);
@@ -2499,7 +2665,11 @@ static void VBlankCB_WhiteBarsFade(void)
     SetGpuReg(REG_OFFSET_WIN0V, sTransitionData->win0H); // BUG: This should obviously be sTransitionData->win0V
     if (sTransitionData->vblankDma)
         DmaCopy16(3, gScanlineEffectRegBuffers[0], gScanlineEffectRegBuffers[1], DISPLAY_HEIGHT * 4);
+#ifdef PLATFORM_NATIVE
+    BT_SetScanlineEffect(HALGFX_REG_WIN0H, &gScanlineEffectRegBuffers[1][DISPLAY_HEIGHT]);
+#else
     DmaSet(0, &gScanlineEffectRegBuffers[1][DISPLAY_HEIGHT], &REG_WIN0H, B_TRANS_DMA_FLAGS);
+#endif
 }
 
 static void VBlankCB_WhiteBarsFade_Blend(void)
@@ -2723,7 +2893,11 @@ static bool8 AngledWipes_TryEnd(struct Task *task)
     else
     {
         // End transition
+#ifdef PLATFORM_NATIVE
+        BT_StopScanlineEffect();
+#else
         DmaStop(0);
+#endif
         FadeScreenBlack();
         DestroyTask(FindTaskIdByFunc(Task_AngledWipes));
         return FALSE;
@@ -2744,7 +2918,11 @@ static bool8 AngledWipes_StartNext(struct Task *task)
 
 static void VBlankCB_AngledWipes(void)
 {
+#ifdef PLATFORM_NATIVE
+    BT_StopScanlineEffect();
+#else
     DmaStop(0);
+#endif
     VBlankCB_BattleTransition();
     if (sTransitionData->vblankDma)
         DmaCopy16(3, gScanlineEffectRegBuffers[0], gScanlineEffectRegBuffers[1], DISPLAY_HEIGHT * 2);
@@ -2752,7 +2930,11 @@ static void VBlankCB_AngledWipes(void)
     SetGpuReg(REG_OFFSET_WINOUT, sTransitionData->winOut);
     SetGpuReg(REG_OFFSET_WIN0V, sTransitionData->win0V);
     SetGpuReg(REG_OFFSET_WIN0H, gScanlineEffectRegBuffers[1][0]);
+#ifdef PLATFORM_NATIVE
+    BT_SetScanlineEffect(HALGFX_REG_WIN0H, gScanlineEffectRegBuffers[1]);
+#else
     DmaSet(0, gScanlineEffectRegBuffers[1], &REG_WIN0H, B_TRANS_DMA_FLAGS);
+#endif
 }
 
 #undef tWipeId

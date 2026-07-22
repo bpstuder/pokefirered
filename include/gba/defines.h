@@ -23,7 +23,21 @@
 
 #define ALIGNED(n) __attribute__((aligned(n)))
 
+// [Phase 2] SOUND_INFO_PTR is a fixed-IWRAM-address trick (so the
+// hand-written m4a_1.s assembly mixer can reach the same pointer
+// without a linker symbol) — meaningless on native, there's no IWRAM at
+// 0x3007FF0. Used pervasively throughout m4a.c, not just the functions
+// Stage B has touched so far, so fixed once here rather than patched at
+// every use site: native redirects it to a plain global pointer,
+// defined in m4a.c (the file that already owns SOUND_INFO_PTR's
+// lifecycle via SoundInit). See docs/wiki/Hardware-Touchpoints.md §5 /
+// ARCHITECTURE.md.
+#ifdef PLATFORM_NATIVE
+extern struct SoundInfo *gNativeSoundInfoPtr;
+#define SOUND_INFO_PTR gNativeSoundInfoPtr
+#else
 #define SOUND_INFO_PTR (*(struct SoundInfo **)0x3007FF0)
+#endif
 #define INTR_CHECK     (*(u16 *)0x3007FF8)
 #define INTR_VECTOR    (*(void **)0x3007FFC)
 

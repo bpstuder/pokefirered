@@ -13,6 +13,10 @@
 #include "battle_main.h"
 #include "battle_anim.h"
 #include "battle_interface.h"
+#ifdef PLATFORM_NATIVE
+#include "gfx.h"
+#include <string.h>
+#endif
 #include "constants/battle_anim.h"
 #include "constants/moves.h"
 #include "constants/songs.h"
@@ -674,7 +678,12 @@ void HandleSpeciesGfxDataChange(u8 battlerAtk, u8 battlerDef, u8 transformType)
                                                   personalityValue);
         src = gMonSpritesGfxPtr->sprites[position];
         dst = (void *)(VRAM + 0x10000 + gSprites[gBattlerSpriteIds[battlerAtk]].oam.tileNum * 32);
+        // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §1 / ARCHITECTURE.md
+#ifdef PLATFORM_NATIVE
+        HalGfx_CopyToRegion(HALGFX_DEST_OBJ_VRAM, (u8 *)dst - (u8 *)OBJ_VRAM0, src, 0x800);
+#else
         DmaCopy32(3, src, dst, 0x800);
+#endif
         paletteOffset = OBJ_PLTT_ID(battlerAtk);
         lzPaletteData = GetMonSpritePalFromSpeciesAndPersonality(targetSpecies, otId, personalityValue);
         buffer = AllocZeroed(0x400);
@@ -732,7 +741,12 @@ void HandleSpeciesGfxDataChange(u8 battlerAtk, u8 battlerDef, u8 transformType)
         }
         src = gMonSpritesGfxPtr->sprites[position];
         dst = (void *)(VRAM + 0x10000 + gSprites[gBattlerSpriteIds[battlerAtk]].oam.tileNum * 32);
+        // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §1 / ARCHITECTURE.md
+#ifdef PLATFORM_NATIVE
+        HalGfx_CopyToRegion(HALGFX_DEST_OBJ_VRAM, (u8 *)dst - (u8 *)OBJ_VRAM0, src, 0x800);
+#else
         DmaCopy32(3, src, dst, 0x800);
+#endif
         paletteOffset = OBJ_PLTT_ID(battlerAtk);
         lzPaletteData = GetMonSpritePalFromSpeciesAndPersonality(targetSpecies, otId, personalityValue);
         buffer = AllocZeroed(0x400);
@@ -772,7 +786,14 @@ void BattleLoadSubstituteOrMonSpriteGfx(u8 battlerId, bool8 loadMonSprite)
 
             ++ptr;
             --ptr;
+            // [Phase 2] WRAM-to-WRAM copy, not VRAM — a plain DMA pass
+            // per the DMA audit (Hardware-Touchpoints.md §2), not a
+            // gfx.h concern. Native just memcpy()s.
+#ifdef PLATFORM_NATIVE
+            memcpy((*ptr)[i], (*ptr)[0], 0x800);
+#else
             DmaCopy32Defvars(3, (*ptr)[0], (*ptr)[i], 0x800);
+#endif
         }
         palOffset = OBJ_PLTT_ID(battlerId);
         LoadCompressedPalette(gSubstituteDollPal, palOffset, PLTT_SIZE_4BPP);

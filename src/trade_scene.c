@@ -34,6 +34,9 @@
 #include "constants/region_map_sections.h"
 #include "constants/moves.h"
 #include "sloopsvc.h"
+#ifdef PLATFORM_NATIVE
+#include "gfx.h"
+#endif
 
 // Values for signaling to/from the link partner
 enum {
@@ -1110,6 +1113,18 @@ static void CB2_InGameTrade(void)
     UpdatePaletteFade();
 }
 
+// [Phase 2] See docs/wiki/Hardware-Touchpoints.md §1 / ARCHITECTURE.md.
+// DmaCopyLarge16/DmaCopy16Defvars calls below are guarded per-site
+// (all target BG_VRAM via BG_CHAR_ADDR/BG_SCREEN_ADDR). The 3
+// LZ77UnCompVram calls (cases 2 and 3) are NOT guarded — BIOS SWI
+// decompress-to-VRAM is a much bigger, separate touchpoint used all
+// over engine/, not scoped to this file; deferred as its own future
+// item, not attempted here.
+#ifdef PLATFORM_NATIVE
+#define TRADE_DMA_TO_BG_VRAM(src, dest, size) \
+    HalGfx_CopyToRegion(HALGFX_DEST_BG_VRAM, (u8 *)(dest) - (u8 *)BG_VRAM, (src), (size))
+#endif
+
 static void SetTradeSequenceBgGpuRegs(u8 state)
 {
     switch (state)
@@ -1120,8 +1135,13 @@ static void SetTradeSequenceBgGpuRegs(u8 state)
         SetGpuReg(REG_OFFSET_DISPCNT, DISPCNT_MODE_0 | DISPCNT_OBJ_1D_MAP | DISPCNT_BG0_ON | DISPCNT_BG2_ON | DISPCNT_OBJ_ON);
         SetGpuReg(REG_OFFSET_BG2CNT, BGCNT_PRIORITY(2) | BGCNT_CHARBASE(1) | BGCNT_SCREENBASE(18) | BGCNT_TXT512x256);
         LoadPalette(gTradeGba2_Pal, BG_PLTT_ID(1), 3 * PLTT_SIZE_4BPP);
+#ifdef PLATFORM_NATIVE
+        TRADE_DMA_TO_BG_VRAM(gTradeGba_Gfx, BG_CHAR_ADDR(1), 0x1420);
+        TRADE_DMA_TO_BG_VRAM(gTradeOrHatchMonShadowTilemap, BG_SCREEN_ADDR(18), 0x1000);
+#else
         DmaCopyLarge16(3, gTradeGba_Gfx, (void *)BG_CHAR_ADDR(1), 0x1420, 0x1000);
         DmaCopy16Defvars(3, gTradeOrHatchMonShadowTilemap, (void *)BG_SCREEN_ADDR(18), 0x1000);
+#endif
         break;
     case 1:
         sTradeAnim->bg1hofs = 0;
@@ -1131,13 +1151,25 @@ static void SetTradeSequenceBgGpuRegs(u8 state)
         SetGpuReg(REG_OFFSET_BG2CNT, BGCNT_PRIORITY(2) | BGCNT_CHARBASE(1) | BGCNT_SCREENBASE(18) | BGCNT_TXT256x512);
         if (sTradeAnim->isCableTrade)
         {
+#ifdef PLATFORM_NATIVE
+            TRADE_DMA_TO_BG_VRAM(sGbaMapCable, BG_SCREEN_ADDR(5), 0x1000);
+#else
             DmaCopy16Defvars(3, sGbaMapCable, (void *)BG_SCREEN_ADDR(5), 0x1000);
+#endif
         }
         else
         {
+#ifdef PLATFORM_NATIVE
+            TRADE_DMA_TO_BG_VRAM(sGbaMapWireless, BG_SCREEN_ADDR(5), 0x1000);
+#else
             DmaCopy16Defvars(3, sGbaMapWireless, (void *)BG_SCREEN_ADDR(5), 0x1000);
+#endif
         }
+#ifdef PLATFORM_NATIVE
+        TRADE_DMA_TO_BG_VRAM(gTradeGba_Gfx, BG_CHAR_ADDR(0), 0x1420);
+#else
         DmaCopyLarge16(3, gTradeGba_Gfx, (void *)BG_CHAR_ADDR(0), 0x1420, 0x1000);
+#endif
         SetGpuReg(REG_OFFSET_DISPCNT, DISPCNT_MODE_0 | DISPCNT_OBJ_1D_MAP | DISPCNT_BG1_ON | DISPCNT_OBJ_ON);
         break;
     case 2:
@@ -1152,7 +1184,11 @@ static void SetTradeSequenceBgGpuRegs(u8 state)
         else
         {
             SetGpuReg(REG_OFFSET_DISPCNT, DISPCNT_MODE_1 | DISPCNT_OBJ_1D_MAP | DISPCNT_BG1_ON | DISPCNT_OBJ_ON);
+#ifdef PLATFORM_NATIVE
+            TRADE_DMA_TO_BG_VRAM(sCableCloseup_Map, BG_SCREEN_ADDR(5), 0x800);
+#else
             DmaCopy16Defvars(3, sCableCloseup_Map, (void *)BG_SCREEN_ADDR(5), 0x800);
+#endif
             BlendPalettes(0x00000001, 0x10, RGB_BLACK);
         }
         break;
@@ -1171,14 +1207,26 @@ static void SetTradeSequenceBgGpuRegs(u8 state)
         sTradeAnim->sXY = 0x20;
         sTradeAnim->bg2Zoom = 0x400;
         sTradeAnim->bg2alpha = 0;
+#ifdef PLATFORM_NATIVE
+        TRADE_DMA_TO_BG_VRAM(sGbaAffine_Gfx, BG_CHAR_ADDR(1), 0x2840);
+#else
         DmaCopyLarge16(3, sGbaAffine_Gfx, (void *)BG_CHAR_ADDR(1), 0x2840, 0x1000);
+#endif
         if (sTradeAnim->isCableTrade)
         {
+#ifdef PLATFORM_NATIVE
+            TRADE_DMA_TO_BG_VRAM(sGbaAffineMapCable, BG_SCREEN_ADDR(18), 0x100);
+#else
             DmaCopy16Defvars(3, sGbaAffineMapCable, (void *)BG_SCREEN_ADDR(18), 0x100);
+#endif
         }
         else
         {
+#ifdef PLATFORM_NATIVE
+            TRADE_DMA_TO_BG_VRAM(sGbaAffineMapWireless, BG_SCREEN_ADDR(18), 0x100);
+#else
             DmaCopy16Defvars(3, sGbaAffineMapWireless, (void *)BG_SCREEN_ADDR(18), 0x100);
+#endif
         }
         break;
     case 5:
@@ -1195,14 +1243,26 @@ static void SetTradeSequenceBgGpuRegs(u8 state)
         sTradeAnim->bg2srcX = 0x78;
         sTradeAnim->bg2srcY = 0x50;
         sTradeAnim->bg2alpha = 0;
+#ifdef PLATFORM_NATIVE
+        TRADE_DMA_TO_BG_VRAM(sGbaAffine_Gfx, BG_CHAR_ADDR(1), 0x2840);
+#else
         DmaCopyLarge16(3, sGbaAffine_Gfx, BG_CHAR_ADDR(1), 0x2840, 0x1000);
+#endif
         if (sTradeAnim->isCableTrade)
         {
+#ifdef PLATFORM_NATIVE
+            TRADE_DMA_TO_BG_VRAM(sGbaAffineMapCable, BG_SCREEN_ADDR(18), 0x100);
+#else
             DmaCopy16Defvars(3, sGbaAffineMapCable, (void *)BG_SCREEN_ADDR(18), 0x100);
+#endif
         }
         else
         {
+#ifdef PLATFORM_NATIVE
+            TRADE_DMA_TO_BG_VRAM(sGbaAffineMapWireless, BG_SCREEN_ADDR(18), 0x100);
+#else
             DmaCopy16Defvars(3, sGbaAffineMapWireless, (void *)BG_SCREEN_ADDR(18), 0x100);
+#endif
         }
         break;
     case 7:
@@ -1211,8 +1271,13 @@ static void SetTradeSequenceBgGpuRegs(u8 state)
         SetGpuReg(REG_OFFSET_BLDCNT, 0);
         SetGpuReg(REG_OFFSET_BG2CNT, BGCNT_PRIORITY(2) | BGCNT_CHARBASE(1) | BGCNT_SCREENBASE(18) | BGCNT_TXT512x256);
         LoadPalette(gTradeGba2_Pal, BG_PLTT_ID(1), 3 * PLTT_SIZE_4BPP);
+#ifdef PLATFORM_NATIVE
+        TRADE_DMA_TO_BG_VRAM(gTradeGba_Gfx, BG_CHAR_ADDR(1), 0x1420);
+        TRADE_DMA_TO_BG_VRAM(gTradeOrHatchMonShadowTilemap, BG_SCREEN_ADDR(18), 0x1000);
+#else
         DmaCopyLarge16(3, gTradeGba_Gfx, (void *)BG_CHAR_ADDR(1), 0x1420, 0x1000);
         DmaCopy16Defvars(3, gTradeOrHatchMonShadowTilemap, (void *)BG_SCREEN_ADDR(18), 0x1000);
+#endif
         break;
     }
 }

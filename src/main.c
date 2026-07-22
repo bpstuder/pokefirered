@@ -16,6 +16,10 @@
 #include "save_failed_screen.h"
 #include "quest_log.h"
 #include "sloopsvc.h"
+#ifdef PLATFORM_NATIVE
+#include "input.h"
+#include "timing.h"
+#endif
 
 extern u32 intr_main[];
 
@@ -213,7 +217,18 @@ void AgbMain()
 
         PlayTimeCounter_Update();
         MapMusicMain();
+        // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §4 / ARCHITECTURE.md
+        // / timing.h's header comment for why native needs an explicit
+        // VBlankIntr() call here: on GBA, VBlankIntr fires asynchronously
+        // via hardware IRQ *during* WaitForVBlank()'s spin; native has no
+        // interrupt to do that implicitly, so HalTiming_WaitForNextFrame()
+        // returning is the one point where something must call it instead.
+#ifdef PLATFORM_NATIVE
+        HalTiming_WaitForNextFrame();
+        VBlankIntr();
+#else
         WaitForVBlank();
+#endif
     }
 }
 
@@ -258,15 +273,26 @@ void SetMainCallback2(MainCallback callback)
 
 void StartTimer1(void)
 {
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §3 / ARCHITECTURE.md.
+    // Native has no hardware timer to start — a monotonic clock is
+    // always available, nothing to do here.
+#ifndef PLATFORM_NATIVE
     REG_TM1CNT_H = 0x80;
+#endif
 }
 
 void SeedRngAndSetTrainerId(void)
 {
+#ifdef PLATFORM_NATIVE
+    u16 val = (u16)HalTiming_GetEntropyTicks();
+    SeedRng(val);
+    gTrainerId = val;
+#else
     u16 val = REG_TM1CNT_L;
     SeedRng(val);
     REG_TM1CNT_H = 0;
     gTrainerId = val;
+#endif
 }
 
 u16 GetGeneratedTrainerIdLower(void)
@@ -295,7 +321,16 @@ void InitKeys(void)
 
 static void ReadKeys(void)
 {
+    // [Phase 2] HalInput_ReadRaw() is the input.h HAL primitive for
+    // native builds (see ARCHITECTURE.md); this GBA target keeps the
+    // original inline register read unconditionally, since an
+    // unconditional call here would change codegen and break
+    // GBA-matching (agbcc can't inline across translation units).
+#ifdef PLATFORM_NATIVE
+    u16 keyInput = HalInput_ReadRaw();
+#else
     u16 keyInput = REG_KEYINPUT ^ KEYS_MASK;
+#endif
     gMain.newKeysRaw = keyInput & ~gMain.heldKeysRaw;
     gMain.newKeys = gMain.newKeysRaw;
     gMain.newAndRepeatedKeys = gMain.newKeysRaw;

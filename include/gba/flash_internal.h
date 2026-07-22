@@ -80,4 +80,14 @@ u16 ProgramFlashSector_MX(u16 sectorNum, void *src);
 // agb_flash_1m
 u16 IdentifyFlash(void);
 
+#ifdef PLATFORM_NATIVE
+// [Phase 2] See docs/wiki/Hardware-Touchpoints.md §7 / ARCHITECTURE.md /
+// storage.h's header comment. EraseFlashSector is a vendor-dispatched
+// function *pointer* (assigned by IdentifyFlash), not a plain function,
+// so it can't be guarded in place like ReadFlash/ProgramFlashSectorAndVerify
+// — load_save.c's native CheckForFlashMemory() branch points it here
+// instead of calling IdentifyFlash() at all.
+u16 HalStorage_EraseSectorAdapter(u16 sectorNum);
+#endif
+
 #endif // GUARD_GBA_FLASH_INTERNAL_H

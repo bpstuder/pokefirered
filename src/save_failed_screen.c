@@ -6,6 +6,10 @@
 #include "m4a.h"
 #include "save.h"
 #include "strings.h"
+#ifdef PLATFORM_NATIVE
+#include "gfx.h"
+#include "storage.h"
+#endif
 
 COMMON_DATA bool32 sIsInSaveFailedScreen = 0;
 
@@ -118,12 +122,23 @@ static void BlankPalettes(void)
 
 static void RequestDmaCopyFromScreenBuffer(void)
 {
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §1 / ARCHITECTURE.md
+#ifdef PLATFORM_NATIVE
+    HalGfx_CopyToRegion(HALGFX_DEST_BG_VRAM, (u8 *)BG_SCREEN_ADDR(31) - (u8 *)BG_VRAM,
+                         gDecompressionBuffer + 0x3800, 0x500);
+#else
     RequestDma3Copy(gDecompressionBuffer + 0x3800, (void *)BG_SCREEN_ADDR(31), 0x500, DMA3_16BIT);
+#endif
 }
 
 static void RequestDmaCopyFromCharBuffer(void)
 {
+#ifdef PLATFORM_NATIVE
+    HalGfx_CopyToRegion(HALGFX_DEST_BG_VRAM, (u8 *)BG_CHAR_ADDR(3) + 0x20 - (u8 *)BG_VRAM,
+                         gDecompressionBuffer + 0x020, 0x2300);
+#else
     RequestDma3Copy(gDecompressionBuffer + 0x020, (void *)BG_CHAR_ADDR(3) + 0x20, 0x2300, DMA3_16BIT);
+#endif
 }
 
 static void FillBgMapBufferRect(u16 baseBlock, u8 left, u8 top, u8 width, u8 height, u16 blockOffset)
@@ -189,16 +204,30 @@ static bool16 VerifySectorWipe(u32 sector)
 
 static bool32 WipeSector(u32 sector)
 {
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §7 / ARCHITECTURE.md.
+    // Native replaces the byte-at-a-time ProgramFlashByte loop with a
+    // single HalStorage_Erase — the loop's actual intent (zero a whole
+    // sector) is exactly what that primitive does, no need to replicate
+    // the GBA byte-write quirk. VerifySectorWipe below is unchanged and
+    // needs no native branch of its own: it calls ReadFlash, already
+    // guarded above.
     bool32 result;
-    u16 i, j;
+    u16 i;
+#ifndef PLATFORM_NATIVE
+    u16 j;
+#endif
 
     i = 0;
     while (i < 130)
     {
+#ifdef PLATFORM_NATIVE
+        HalStorage_Erase(sector * 4096u, 4096u);
+#else
         for (j = 0; j < 0x1000; j++)
         {
             ProgramFlashByte(sector, j, 0);
         }
+#endif
         result = VerifySectorWipe(sector);
         i++;
         if (!result)

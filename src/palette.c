@@ -3,6 +3,10 @@
 #include "util.h"
 #include "decompress.h"
 #include "task.h"
+#ifdef PLATFORM_NATIVE
+#include "gfx.h"
+#include <string.h>
+#endif
 
 enum
 {
@@ -102,8 +106,15 @@ void TransferPlttBuffer(void)
     if (!gPaletteFade.bufferTransferDisabled)
     {
         void *src = gPlttBufferFaded;
-        void *dest = (void *)PLTT;
-        DmaCopy16(3, src, dest, PLTT_SIZE);
+        // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §1 / ARCHITECTURE.md
+#ifdef PLATFORM_NATIVE
+        HalGfx_CopyToRegion(HALGFX_DEST_PLTT, 0, src, PLTT_SIZE);
+#else
+        {
+            void *dest = (void *)PLTT;
+            DmaCopy16(3, src, dest, PLTT_SIZE);
+        }
+#endif
         sPlttBufferTransferPending = FALSE;
         if (gPaletteFade.mode == HARDWARE_FADE && gPaletteFade.active)
             UpdateBlendRegisters();
@@ -138,6 +149,17 @@ void ResetPaletteFade(void)
 
 void ReadPlttIntoBuffers(void)
 {
+    // [Phase 2] See docs/wiki/Hardware-Touchpoints.md §1 / ARCHITECTURE.md
+#ifdef PLATFORM_NATIVE
+    // [Phase 2 fix] CpuCopy16 is a GBA BIOS SWI wrapper (CpuSet) — not
+    // portable, would not compile/work on a real native target even
+    // though nothing caught it yet (make gba never compiles this
+    // branch). Found while doing similar audio.h work and auditing for
+    // the same mistake elsewhere; use plain memcpy instead, matching
+    // the convention already established in battle_gfx_sfx_util.c.
+    HalGfx_ReadRegion(HALGFX_DEST_PLTT, 0, gPlttBufferUnfaded, PLTT_SIZE);
+    memcpy(gPlttBufferFaded, gPlttBufferUnfaded, PLTT_SIZE);
+#else
     u16 i;
     u16 *pltt = (u16 *)PLTT;
 
@@ -146,6 +168,7 @@ void ReadPlttIntoBuffers(void)
         gPlttBufferUnfaded[i] = pltt[i];
         gPlttBufferFaded[i] = pltt[i];
     }
+#endif
 }
 
 bool8 BeginNormalPaletteFade(u32 selectedPalettes, s8 delay, u8 startY, u8 targetY, u16 blendColor)

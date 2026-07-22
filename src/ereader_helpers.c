@@ -1,6 +1,9 @@
 #include "global.h"
 #include "link.h"
 #include "ereader_helpers.h"
+#ifdef PLATFORM_NATIVE
+#include "input.h"
+#endif
 
 struct SendRecvMgr
 {
@@ -377,7 +380,13 @@ static void DisableTm3(void)
 
 static void GetKeyInput(void)
 {
+    // [Phase 2] See main.c's ReadKeys() for why this stays an
+    // unconditional inline read on the GBA target.
+#ifdef PLATFORM_NATIVE
+    u16 rawKeys = HalInput_ReadRaw();
+#else
     u16 rawKeys = REG_KEYINPUT ^ 0x3FF;
+#endif
     sJoyNew = rawKeys & ~sJoyNewOrRepeated;
     sJoyNewOrRepeated = rawKeys;
 }
